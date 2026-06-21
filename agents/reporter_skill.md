@@ -11,19 +11,62 @@ Bash ツールで git clone する:
 git clone --depth 1 <リポジトリURL> <クローン先パス>
 ```
 
-### STEP 2: ファイルの調査
-以下の優先順位で Glob / Bash でファイルを一覧取得し、Read で内容確認:
-1. 設定・シークレットファイル（`.env`, `config.*`, `*.yaml`, `*.yml`, `*.json`, `*.ini`, `*.toml`）
-2. 認証・セッション・ログイン関連コード
-3. データベースアクセスコード（SQL クエリを含むファイル）
-4. APIエンドポイント・ルーティング
-5. 依存関係ファイル（`package.json`, `requirements.txt`, `Gemfile`, `pom.xml`）
-6. その他のソースコード（`.py`, `.js`, `.ts`, `.php`, `.rb`, `.go`, `.java`, `.cs` など）
+### STEP 2: grep-firstスキャン（トークン節約のため必ずこの順番で実行）
 
-スキップするディレクトリ: `node_modules/`, `.git/`, `__pycache__/`, `venv/`, `dist/`, `build/`
+**2-1. 脆弱性パターンをgrepで検索する**
+
+Bash ツールで以下を実行し、ヒットした行だけを記録する:
+
+```bash
+grep -rn \
+  -e "API_KEY\s*=\s*['\"]" \
+  -e "PASSWORD\s*=\s*['\"]" \
+  -e "SECRET\s*=\s*['\"]" \
+  -e "TOKEN\s*=\s*['\"]" \
+  -e "eval(" \
+  -e "pickle\.loads(" \
+  -e "os\.system(" \
+  -e "shell=True" \
+  -e "SELECT.*WHERE.*=" \
+  -e "execute(f['\"]" \
+  --include="*.py" --include="*.js" --include="*.ts" \
+  --include="*.php" --include="*.rb" --include="*.go" \
+  --include="*.java" --include="*.cs" --include="*.env" \
+  --include="*.yaml" --include="*.yml" --include="*.toml" \
+  --include="*.ini" --include="*.cfg" \
+  --exclude-dir=node_modules --exclude-dir=.git \
+  --exclude-dir=__pycache__ --exclude-dir=venv \
+  --exclude-dir=dist --exclude-dir=build \
+  --exclude-dir=vendor --exclude-dir=.next \
+  --exclude-dir=coverage --exclude="*.min.js" \
+  --max-count=5 \
+  <クローン先パス> 2>/dev/null | head -200
+```
+
+**2-2. ヒットしたファイルだけを Read する**
+
+grepの出力から `ファイルパス:行番号:` を抽出し、**ヒットしたファイルのみ** を Read ツールで読み込む。
+ヒットしていないファイルは読まない（トークン節約のため）。
+
+Read の際は `offset` と `limit` を使い、ヒット行の前後30行程度に絞る:
+```
+Read(file_path="...", offset=max(1, 行番号-15), limit=60)
+```
+
+100KB を超えるファイルは以下で確認してからスキップ判断する:
+```bash
+wc -c <ファイルパス>
+```
+
+**2-3. 設定・依存関係ファイルを確認する**
+
+grepと並行して、以下のファイルが存在すれば Read する（シークレットや既知の脆弱依存を確認）:
+- `.env`, `.env.*`
+- `package.json`, `requirements.txt`, `Gemfile`, `pom.xml`, `go.mod`
 
 ### STEP 3: コード分析
-Read ツールで各ファイルの内容を確認し、下記チェック基準に従って脆弱性を特定する。
+STEP 2 で Read したファイルの内容をもとに、下記チェック基準に従って脆弱性を特定する。
+grep でヒットした行を起点に、その前後のコンテキストで脆弱性を判断すること。
 
 ### STEP 4: HTMLレポートの生成・保存
 下記 **HTMLテンプレート** に従ったファイルを Write ツールで `HTMLレポート出力先` に保存する。
